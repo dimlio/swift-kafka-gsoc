@@ -319,6 +319,12 @@ public final class KafkaConsumer {
         dispatchPrecondition(condition: .onQueue(self.serialQueue))
         assert(!closed)
 
+        return try rawPoll(timeout: timeout)
+    }
+
+    public func rawPoll(timeout: Int32 = 100) throws -> KafkaConsumerMessage? {
+        assert(!closed)
+
         guard let messagePointer = self.client.withKafkaHandlePointer({ handle in
             rd_kafka_consumer_poll(handle, timeout)
         }) else {
