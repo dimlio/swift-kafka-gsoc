@@ -28,6 +28,14 @@ let package = Package(
             name: "SwiftKafka",
             targets: ["SwiftKafka"]
         ),
+        .executable(
+            name: "TestConsumer",
+            targets: ["TestConsumer"]
+        ),
+        .executable(
+            name: "TestProducer",
+            targets: ["TestProducer"]
+        ),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.43.1"),
@@ -48,6 +56,17 @@ let package = Package(
             providers: [
                 .brew(["librdkafka"]),
                 .apt(["librdkafka-dev"]),
+            ]
+        ),
+        .executableTarget(
+            name: "TestConsumer",
+            dependencies: ["SwiftKafka"]
+        ),
+        .executableTarget(
+            name: "TestProducer",
+            dependencies: [
+                "SwiftKafka",
+                .product(name: "NIOCore", package: "swift-nio"),
             ]
         ),
         .testTarget(
