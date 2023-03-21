@@ -65,7 +65,7 @@ struct TestConsumer {
             logger: Logger(label: "consumer-logger"))
 
         guard let method = CommandLine.arguments.dropFirst().first else {
-            print("No consume methods specified, available ones: nio, poll, stream, queue")
+            print("No consume methods specified, available ones: nio, poll, stream, queue, messages1")
             return
         }
 
@@ -74,8 +74,9 @@ struct TestConsumer {
         case "poll": await readWithPoll(consumer)
         case "stream": await readWithAsyncStream(consumer)
         case "queue": readWithDispatchQueue(consumer)
+        case "messages1": await readWithMessages1(consumer)
         default:
-            print("Invalid consume method \"\(method)\" specified, available ones: nio, poll, stream, queue")
+            print("Invalid consume method \"\(method)\" specified, available ones: nio, poll, stream, queue, messages1")
         }
     }
 
@@ -144,6 +145,20 @@ struct TestConsumer {
             queue.async {
                 rateCalc.add(message)
             }
+        }
+    }
+
+    static func readWithMessages1(_ consumer: KafkaConsumer) async {
+        print("Consume using messages1")
+
+        var rateCalc = RateCalculator()
+
+        for await messageResult in consumer.messages1 {
+            guard case .success(let message) = messageResult else {
+                fatalError("consumer returned failure: \(messageResult)")
+            }
+
+            rateCalc.add(message)
         }
     }
 }

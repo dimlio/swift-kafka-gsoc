@@ -17,6 +17,7 @@ import Dispatch
 import struct Foundation.UUID
 import Logging
 import NIOCore
+import NIOConcurrencyHelpers
 
 /// `NIOAsyncSequenceProducerDelegate` implementation handling backpressure for ``KafkaConsumer``.
 private struct ConsumerMessagesAsyncSequenceDelegate: NIOAsyncSequenceProducerDelegate {
@@ -83,6 +84,124 @@ public final class KafkaConsumer {
     /// `AsyncSequence` that returns all ``KafkaConsumerMessage`` objects that the consumer receives.
     public private(set) var messages: ConsumerMessagesAsyncSequence!
 
+
+    public struct AsyncMessages: AsyncSequence {
+        public typealias Element = Result<KafkaConsumerMessage, KafkaError>
+
+        public struct AsyncIterator: AsyncIteratorProtocol {
+            private let consumer: KafkaConsumer
+            private var buffer = [Element?]()
+            private var index = 0
+
+            init(consumer: KafkaConsumer) {
+                self.consumer = consumer
+            }
+
+            public mutating func next() async -> Element? {
+                while (true) { // no more than two iteration
+                    if _fastPath(index < buffer.count) {
+                        let value = buffer[index]
+                        buffer[index] = nil
+                        index += 1
+                        return value
+                    }
+
+                    index = 0
+                    buffer.removeAll(keepingCapacity: true)
+                    await consumer.refillBuffer(&buffer)
+                }
+            }
+        }
+
+        public func makeAsyncIterator() -> AsyncIterator {
+            AsyncIterator(consumer: consumer)
+        }
+
+        private let consumer: KafkaConsumer
+
+        init(consumer: KafkaConsumer) {
+            self.consumer = consumer
+        }
+    }
+
+    public private(set) var messages1: AsyncMessages!
+
+    private let lock = NIOLock() // protects backBuffer and consumer below
+    private var backBuffer = [Element?]()
+    private var consumer: UnsafeContinuation<Void, Never>?
+
+    private func refillBuffer(_ frontBuffer: inout [Element?]) async {
+        while true { // no more than two iterations
+            // check back buffer first
+            lock.withLockVoid {
+                swap(&frontBuffer, &backBuffer)
+            }
+
+            if !frontBuffer.isEmpty { // has some messages to process
+                // schedule background re-fill
+                refillBufferAsync()
+                return
+            }
+
+            // no messages to process, schedule async refill and wait
+            await withUnsafeContinuation { continuation in
+                lock.withLockVoid {
+                    self.consumer = continuation
+                }
+                refillBufferAsync()
+            }
+
+            // after wake-up there should be new data in backBuffer
+        }
+    }
+
+    private func refillBufferAsync() {
+        serialQueue.async {
+            var buffer = [Element?]()
+
+            // try to re-use buffer storage
+            self.lock.withLockVoid {
+                swap(&buffer, &self.backBuffer)
+            }
+
+            // fill buffer from Kafka queue
+
+            var timeout: Int32 = 0 // first use poll() with 0 timeout to fill the buffer as fast as possible
+            while buffer.count < 1000 {
+                let message: KafkaConsumerMessage?
+                do {
+                    message = try self.rawPoll(timeout: timeout)
+                } catch {
+                    buffer.append(.failure(error as! KafkaError))
+                    break // report errors ASAP
+                }
+
+                if let message {
+                    buffer.append(.success(message))
+                    // try to read another message without timeout
+                    timeout = 0
+                    continue
+                }
+
+                // Kafka queue is empty, check if we have smth to return to reader
+                if !buffer.isEmpty {
+                    break
+                }
+
+                // otherwise we can poll() with timeout
+                timeout = 10
+            }
+
+            var consumer: UnsafeContinuation<Void, Never>?
+            self.lock.withLockVoid {
+                swap(&self.backBuffer, &buffer)
+                swap(&consumer, &self.consumer)
+            }
+
+            consumer?.resume()
+        }
+    }
+
     /// Initialize a new ``KafkaConsumer``.
     /// To listen to incoming messages, please subscribe to a list of topics using ``subscribe(topics:)``
     /// or assign the consumer to a particular topic + partition pair using ``assign(topic:partition:offset:)``.
@@ -129,6 +248,7 @@ public final class KafkaConsumer {
         self.messages = ConsumerMessagesAsyncSequence(
             wrappedSequence: messagesSourceAndSequence.sequence
         )
+        self.messages1 = AsyncMessages(consumer: self)
     }
 
     /// Initialize a new ``KafkaConsumer`` and subscribe to the given list of `topics` as part of
